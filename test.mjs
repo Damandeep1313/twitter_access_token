@@ -21,7 +21,7 @@ const CLIENT_ID = 'aWhxbmxMTDFQRXlaTG1GeDQ5NFU6MTpjaQ';
 const CLIENT_SECRET = 'hZICYkSqCKJtfJKfXRvEt35X98dqV1cu6MPPi-KWYbuopPCtPn';
 
 // This must match exactly the "Callback URL" in the Twitter Dev Portal
-const REDIRECT_URI = 'http://127.0.0.1:3000/callback';
+const REDIRECT_URI = 'https://serverless.on-demand.io/apps/access-token/callback';
 
 // We will do the simplest possible code challenge: plain text
 const codeChallenge = 'challenge';
