@@ -22,4 +22,4 @@ EXPOSE 3000
 # ENV CLIENT_SECRET=your_client_secret
 
 # Step 8: Start the application with server1.js
-CMD ["node", "server.js"]
+CMD ["node", "test.mjs"]
