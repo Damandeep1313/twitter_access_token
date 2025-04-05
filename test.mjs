@@ -1,187 +1,226 @@
-//
-// test.mjs
-//
-// Run with: node test.mjs
-// Make sure .env is in the same directory and you installed dotenv, express, node-fetch, open.
-//
+/**
+ * server.js
+ *
+ * Run:  node server.js
+ *
+ * Then visit: http://127.0.0.1:3000/start
+ */
 
-import path from 'path';
-import fs from 'fs';
-import 'dotenv/config';  // Make sure this is at the VERY TOP, before accessing process.env
-import express from 'express';
-import fetch from 'node-fetch';
-import crypto from 'crypto';
+const express = require('express');
+const axios = require('axios');
+const dotenv = require('dotenv');
+const crypto = require('crypto');
+const fetch = require('node-fetch');  // Or remove if you have Node 18+ with built-in fetch
 
-// -------------------------------------------------------------------
-// 0. Debug: Check if .env file even exists in this directory
-// -------------------------------------------------------------------
-const envPath = path.resolve('.env');
-console.log('[DEBUG] Looking for .env at:', envPath);
-console.log('[DEBUG] .env file exists?', fs.existsSync(envPath));
+dotenv.config();
 
-// -------------------------------------------------------------------
-// 1. Read environment variables and log them
-// -------------------------------------------------------------------
-const {
-  CLIENT_ID,
-  CLIENT_SECRET,
-  PORT,
-  REDIRECT_URI,
-  SCOPES
-} = process.env;
-
-console.log('[DEBUG] CLIENT_ID:', CLIENT_ID);
-console.log('[DEBUG] CLIENT_SECRET:', CLIENT_SECRET ? '***REDACTED***' : 'undefined');
-console.log('[DEBUG] PORT:', PORT);
-console.log('[DEBUG] REDIRECT_URI:', REDIRECT_URI);
-console.log('[DEBUG] SCOPES:', SCOPES);
-
-// -------------------------------------------------------------------
-// 2. If any critical env var is missing, log that and exit early
-// -------------------------------------------------------------------
-if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI || !PORT) {
-  console.error('[ERROR] One or more required env vars are missing. Fix your .env file.');
-  process.exit(1);
-}
-
-// -------------------------------------------------------------------
-// 3. Set up Express server
-// -------------------------------------------------------------------
 const app = express();
+const port = 3000;
+app.use(express.json());
 
-// We'll store the code_verifier in memory for demo
-let codeVerifierGlobal = '';
+// Read your Twitter OAuth credentials from .env
+// (Make sure CONSUMER_KEY and CONSUMER_SECRET are set in your .env)
+const CLIENT_ID = process.env.CONSUMER_KEY; 
+const CLIENT_SECRET = process.env.CONSUMER_SECRET;
+const REDIRECT_URI = 'https://serverless.on-demand.io/apps/tweet/callback';
+const TOKEN_URL = 'https://api.twitter.com/2/oauth2/token';
 
-// PKCE helpers
+// -----------------------------------------------------------------------
+// PKCE Helper Functions
+// -----------------------------------------------------------------------
 function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest();
 }
 
 function base64URLEncode(buffer) {
-  return buffer.toString('base64')
+  return buffer
+    .toString('base64')
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '');
 }
 
 function generatePKCEPair() {
+  // 1. Generate a random code_verifier
   const codeVerifier = base64URLEncode(crypto.randomBytes(32));
+  // 2. Hash it and base64URL-encode for the code_challenge
   const challengeBuffer = sha256(codeVerifier);
   const codeChallenge = base64URLEncode(challengeBuffer);
+
   return { codeVerifier, codeChallenge };
 }
 
-// -------------------------------------------------------------------
-// 4. The /callback route (Twitter will redirect here)
-// -------------------------------------------------------------------
-app.get('/callback', async (req, res) => {
-  console.log('[CALLBACK] Query Params:', req.query);
+// -----------------------------------------------------------------------
+// 1) /start route
+//    - Generate PKCE pair
+//    - Store code_verifier in `state` param
+//    - Redirect user to Twitter
+// -----------------------------------------------------------------------
+app.get('/start', (req, res) => {
+  // Generate the PKCE pair
+  const { codeVerifier, codeChallenge } = generatePKCEPair();
 
-  const { code, state, error, error_description } = req.query;
+  // For a quick demo, embed the codeVerifier in the "state" param (as Base64 JSON).
+  // In production, store it in a server session or encrypt it.
+  const stateObj = { cv: codeVerifier };
+  const encodedState = Buffer.from(JSON.stringify(stateObj)).toString('base64');
+
+  // Build the Twitter OAuth 2.0 Authorization URL
+  const twitterAuthURL = new URL('https://twitter.com/i/oauth2/authorize');
+  twitterAuthURL.searchParams.set('response_type', 'code');
+  twitterAuthURL.searchParams.set('client_id', CLIENT_ID);
+  twitterAuthURL.searchParams.set('redirect_uri', REDIRECT_URI);
+  twitterAuthURL.searchParams.set('scope', 'tweet.read tweet.write users.read offline.access');
+  twitterAuthURL.searchParams.set('state', encodedState);
+  twitterAuthURL.searchParams.set('code_challenge', codeChallenge);
+  twitterAuthURL.searchParams.set('code_challenge_method', 'S256');
+
+  console.log('Redirecting to Twitter OAuth:', twitterAuthURL.toString());
+  return res.redirect(twitterAuthURL.toString());
+});
+
+// -----------------------------------------------------------------------
+// 2) /apps/tweet/callback route
+//    - Twitter redirects here after user login/approval
+//    - We decode the `state` (to get our code_verifier)
+//    - Exchange the authorization code for tokens
+// -----------------------------------------------------------------------
+app.get('/apps/tweet/callback', async (req, res) => {
+  console.log('Callback received:', req.query);
+
+  const authorizationCode = req.query.code;
+  const error = req.query.error;
+  const encodedState = req.query.state || '';
 
   if (error) {
-    console.error('[CALLBACK] Received error param from Twitter:', error, error_description || '');
-    return res.send(`Twitter Error: ${error} - ${error_description || ''}`);
+    console.error('Error in callback:', error);
+    return res.send('Error: ' + error);
   }
 
-  if (!code) {
-    console.error('[CALLBACK] No authorization code received!');
-    return res.send('No code parameter in the query!');
+  if (!authorizationCode) {
+    console.error('Authorization code not found in query params.');
+    return res.send('Authorization code not found. Please try again.');
   }
 
-  // Exchange the code for an access token
-  console.log('[CALLBACK] Exchanging code for token...');
+  // Decode the state param to retrieve the code_verifier
+  let codeVerifier;
   try {
-    const tokenData = await exchangeCodeForToken(code, codeVerifierGlobal);
-    console.log('[CALLBACK] Token Data:', tokenData);
-
-    // Display them in the browser for quick debug
-    res.send(`
-        <h1>Success!</h1>
-        <p><strong>Bearer Access Token:</strong> Bearer ${tokenData.access_token}</p>
-      `);      
+    const decodedBuf = Buffer.from(encodedState, 'base64');
+    const { cv } = JSON.parse(decodedBuf.toString());
+    codeVerifier = cv;
   } catch (err) {
-    console.error('[CALLBACK] Error while exchanging code:', err);
-    res.send(`Error exchanging code: ${err.message}`);
+    console.error('Error decoding state param:', err);
+    return res.send('Invalid state parameter.');
+  }
+
+  // Exchange authorization code + code_verifier for tokens
+  try {
+    const tokenResponse = await getAccessToken(authorizationCode, codeVerifier);
+    console.log('Access Token Response:', tokenResponse);
+
+    if (tokenResponse.access_token) {
+      const bearerToken = `Bearer ${tokenResponse.access_token}`;
+      console.log('Bearer Token:', bearerToken);
+      res.send(`Authorization successful! Access Token: ${bearerToken}`);
+    } else {
+      res.send('Failed to retrieve access token: ' + JSON.stringify(tokenResponse));
+    }
+  } catch (err) {
+    console.error('Error getting access token:', err);
+    res.send('Error retrieving access token. Please try again.');
   }
 });
 
-// -------------------------------------------------------------------
-// 5. New endpoint to START the OAuth flow
-// -------------------------------------------------------------------
-app.get('/apps/access-token/start', (req, res) => {
-  // 1. Generate PKCE pair
-  const { codeVerifier, codeChallenge } = generatePKCEPair();
-  codeVerifierGlobal = codeVerifier;
+// -----------------------------------------------------------------------
+// Exchange authorization code for access token
+// -----------------------------------------------------------------------
+async function getAccessToken(code, codeVerifier) {
+  const headers = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'Authorization': 'Basic ' + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64'),
+  };
 
-  // 2. Build the authorization URL
-  const state = 'randomState123';
-  const authUrl = new URL('https://twitter.com/i/oauth2/authorize');
-  authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('client_id', CLIENT_ID);
-  authUrl.searchParams.set('redirect_uri', REDIRECT_URI);
-  authUrl.searchParams.set('scope', SCOPES); // space-separated is fine
-  authUrl.searchParams.set('state', state);
-  authUrl.searchParams.set('code_challenge', codeChallenge);
-  authUrl.searchParams.set('code_challenge_method', 'S256');
+  console.log('[DEBUG] Exchanging code for token:', {
+    code,
+    codeVerifier,
+    redirect_uri: REDIRECT_URI,
+  });
 
-  console.log('[OAUTH FLOW] Redirecting user to:', authUrl.toString());
-  
-  // 3. Redirect the user to Twitter's OAuth2 login
-  res.redirect(authUrl.toString());
-});
-
-// -------------------------------------------------------------------
-// 6. Listen on PORT
-// -------------------------------------------------------------------
-app.listen(PORT, () => {
-  console.log(`Server listening on http://127.0.0.1:${PORT}`);
-  console.log(`Visit http://127.0.0.1:${PORT}/apps/access-token/start to begin the OAuth flow.`);
-});
-
-// -------------------------------------------------------------------
-// 7. exchangeCodeForToken()
-//     - Exchanges the code at /2/oauth2/token
-// -------------------------------------------------------------------
-async function exchangeCodeForToken(code, codeVerifier) {
-  const tokenUrl = 'https://api.twitter.com/2/oauth2/token';
-
-  console.log('[TOKEN] Exchanging code for token with:');
-  console.log('       code:', code);
-  console.log('       codeVerifier:', codeVerifier);
-  console.log('       redirect_uri:', REDIRECT_URI);
-
-  // Basic Auth header
-  const authHeader = 'Basic ' + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString('base64');
-
-  // Body
-  const bodyParams = new URLSearchParams({
+  const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
     redirect_uri: REDIRECT_URI,
     code_verifier: codeVerifier,
   });
 
-  // Make request
-  const response = await fetch(tokenUrl, {
+  try {
+    const response = await axios.post(TOKEN_URL, body.toString(), { headers });
+    return response.data; 
+  } catch (error) {
+    console.error('Error fetching access token:', 
+                  error.response ? error.response.data : error.message);
+    throw error;
+  }
+}
+
+// -----------------------------------------------------------------------
+// Optional: Write a tweet using the retrieved access token
+// -----------------------------------------------------------------------
+async function writeTweet(accessToken, tweet) {
+  const url = 'https://api.twitter.com/2/tweets';
+
+  // Using fetch, but you can use axios if preferred
+  const response = await fetch(url, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Authorization': authHeader
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
     },
-    body: bodyParams
+    body: JSON.stringify({ text: tweet })
   });
 
-  // Log the response status + text
-  console.log('[TOKEN] Response status:', response.status, response.statusText);
-
-  if (!response.ok) {
-    const errorData = await response.json();
-    console.error('[TOKEN] Error response body:', errorData);
-    throw new Error(`Token request failed (HTTP ${response.status}): ${JSON.stringify(errorData)}`);
-  }
-
-  // Return JSON
   const data = await response.json();
   return data;
 }
+
+// -----------------------------------------------------------------------
+// POST /post/tweet
+//    - Expects a JSON body with { "text": "Hello world" }
+//    - Expects an Authorization header with "Bearer <ACCESS_TOKEN>"
+// -----------------------------------------------------------------------
+app.post("/post/tweet", async (req, res) => {
+  console.log('Incoming request body:', req.body);
+
+  // Extract the access token from the Authorization header
+  const authHeader = req.headers['authorization'];
+  if (!authHeader) {
+    return res.status(400).json({ error: 'Authorization header is missing.' });
+  }
+
+  // The token is what's after "Bearer "
+  const accessToken = authHeader.split(' ')[1];
+  if (!accessToken) {
+    return res.status(400).json({ error: 'Access token is missing in Authorization header.' });
+  }
+
+  // Get the tweet text from the request body
+  const { text } = req.body;
+
+  try {
+    const tweetResponse = await writeTweet(accessToken, text);
+    console.log('Tweet API response:', tweetResponse);
+
+    res.json({ message: 'Tweet sent successfully.', tweetResponse });
+  } catch (error) {
+    console.error('Error posting tweet:', error);
+    res.status(500).json({ error: 'Error posting tweet. Please try again.' });
+  }
+});
+
+// -----------------------------------------------------------------------
+// Start the server
+// -----------------------------------------------------------------------
+app.listen(port, () => {
+  console.log(`Server is running on http://127.0.0.1:${port}`);
+  console.log(`Visit http://127.0.0.1:${port}/start to begin the OAuth flow.`);
+});
